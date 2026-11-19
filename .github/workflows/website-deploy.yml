@@ -147,13 +147,17 @@ jobs:
           EXPECTED_ACCOUNT: ${{ inputs.account-id }}
       - name: Before deploy
         if: inputs.pre-deploy-command != ''
-        run: ${{ inputs.pre-deploy-command }}
+        run: |
+          # An unset secret arrives as an empty string; wrangler then uses wrangler.jsonc's account_id.
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
+          ${{ inputs.pre-deploy-command }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Deploy
         run: |
-          # A build plugin's config already holds the env; wrangler refuses --env with it.
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
+          # A build plugin's config already holds the env, so --env is left off.
           if [ -n "$WRANGLER_ENV" ] && [ ! -f .wrangler/deploy/config.json ]; then
             set -- --env "$WRANGLER_ENV"
           fi
