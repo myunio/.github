@@ -1,7 +1,7 @@
 # Shared workflows
 
-The release flow every Unio website and app repo uses: websitestrategy, ultraoffice,
-unio-software, unioapp-com, unio-app-member-training-checklist and unio-app-warrant-approval.
+The release flow every Unio website repo uses: websitestrategy, ultraoffice, unio-software and
+unioapp-com.
 
 - A pull request runs one check, `ci / check`, which main requires.
 - A merge to main deploys staging.
@@ -9,7 +9,7 @@ unio-software, unioapp-com, unio-app-member-training-checklist and unio-app-warr
   production > Run workflow).
 
 Each repo keeps three short files that call the two workflows here at `@main`, so a change here
-reaches all six at their next run.
+reaches all four at their next run.
 
 | Repo file | Calls | Runs on |
 | --- | --- | --- |
@@ -17,9 +17,9 @@ reaches all six at their next run.
 | `.github/workflows/deploy-staging.yml` | `website-deploy.yml` with `environment: staging` | push to main, or by hand |
 | `.github/workflows/release.yml` | `website-deploy.yml` with `environment: production` | by hand, from main only |
 
-The inputs at the top of each workflow cover the differences between repos: npm, pnpm or no
-Node dependencies, a Ruby build, the build and check commands, D1 migrations before a deploy, and
-the Worker and account each deploy must reach.
+The inputs at the top of each workflow cover the differences between repos: npm or no Node
+dependencies, a Ruby build, the build and check commands, and the Worker and account each deploy
+must reach.
 
 ## What each repo needs
 
@@ -29,8 +29,7 @@ the Worker and account each deploy must reach.
   repository secret of the same name.
 - The repository variable `STAGING_ENABLED` set to `true` once the staging address is ready (behind
   Cloudflare Access where the site is not public). Until then a merge deploys nothing.
-- `wrangler.jsonc` with the production Worker at its top level or under `env.production`, and staging
-  under `env.staging`.
+- `wrangler.jsonc` with the production Worker at its top level and staging under `env.staging`.
 
 ## Safety built in
 
