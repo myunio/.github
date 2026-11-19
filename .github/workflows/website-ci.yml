@@ -1,0 +1,64 @@
+# The pull request check shared by Unio's website and app repos. Each repo calls it from
+# .github/workflows/ci.yml as job `ci`, so the check is named the same everywhere and main can
+# require it. It builds and tests with no deploy credentials.
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: npm, pnpm, or none (no Node dependencies to install).
+        type: string
+        default: npm
+      node-version-file:
+        description: File holding the Node version (.nvmrc, .node-version). Wins over node-version.
+        type: string
+        default: ''
+      node-version:
+        description: Node version when there is no version file.
+        type: string
+        default: '24'
+      ruby-version:
+        description: Ruby version for repos whose build is Ruby. Empty installs no Ruby.
+        type: string
+        default: ''
+      check-command:
+        description: Shell commands that build and test the repo. A failure fails the check.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A newer push to the same pull request replaces the run in progress.
+    concurrency:
+      group: ci-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          cache: ${{ inputs.package-manager != 'none' && inputs.package-manager || '' }}
+      - if: inputs.ruby-version != ''
+        uses: ruby/setup-ruby@20eb24b0d509e2b9ed9b6d42ddfeb992915e0564 # v1.341.0
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+      - name: Install dependencies
+        if: inputs.package-manager != 'none'
+        run: |
+          if [ "$PACKAGE_MANAGER" = pnpm ]; then pnpm install --frozen-lockfile; else npm ci; fi
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      - name: Check
+        run: ${{ inputs.check-command }}
