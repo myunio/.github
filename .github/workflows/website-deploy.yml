@@ -1,0 +1,167 @@
+# Deploys one of Unio's website or app repos to its staging or production Cloudflare Worker.
+# Each repo calls it twice: deploy-staging.yml on every merge to main, and release.yml, run by
+# hand from main (Actions > Release to production > Run workflow).
+#
+# Secrets: the caller passes `secrets: inherit`, and this job names the GitHub environment
+# (staging or production). GitHub then reads CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID from
+# the caller repo's environment first, and from its repository secrets only when the environment
+# has none: "If you include the environment keyword in the reusable workflow at the job level,
+# the environment secret will be used, and not the secret passed from the caller workflow"
+# (https://docs.github.com/en/actions/sharing-automations/reusing-workflows). Each environment
+# admits only main, so a branch can never reach the token.
+#
+# Before it deploys, "Check deploy target" resolves the Worker name and account id the way
+# wrangler will, and stops unless they are the ones the caller named.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment, staging or production.
+        type: string
+        required: true
+      url:
+        description: Address of the deployed site, shown on the run.
+        type: string
+        required: true
+      wrangler-env:
+        description: The env in wrangler.jsonc to deploy (staging, production), or empty for its top level.
+        type: string
+        default: ''
+      worker-name:
+        description: The Worker this deploy must reach. The run stops if wrangler would deploy another.
+        type: string
+        required: true
+      account-id:
+        description: The Cloudflare account this deploy must reach.
+        type: string
+        required: true
+      package-manager:
+        description: npm, pnpm, or none (no Node dependencies; wrangler is fetched at a pinned version).
+        type: string
+        default: npm
+      node-version-file:
+        description: File holding the Node version (.nvmrc, .node-version). Wins over node-version.
+        type: string
+        default: ''
+      node-version:
+        description: Node version when there is no version file.
+        type: string
+        default: '24'
+      ruby-version:
+        description: Ruby version for repos whose build is Ruby. Empty installs no Ruby.
+        type: string
+        default: ''
+      build-command:
+        description: Shell commands that build the site for this environment. CLOUDFLARE_ENV is set to wrangler-env.
+        type: string
+        required: true
+      pre-deploy-command:
+        description: Shell commands run after the target check and before the deploy, such as D1 migrations. $WRANGLER runs wrangler.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy
+    if: github.ref == 'refs/heads/main'
+    # Pinned, so a new ubuntu-latest image cannot break builds unannounced (Playwright 1.56 refuses 26.04).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ inputs.url }}
+    # One deploy at a time per environment; a running deploy is never cancelled.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      WRANGLER_ENV: ${{ inputs.wrangler-env }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          cache: ${{ inputs.package-manager != 'none' && inputs.package-manager || '' }}
+      - if: inputs.ruby-version != ''
+        uses: ruby/setup-ruby@20eb24b0d509e2b9ed9b6d42ddfeb992915e0564 # v1.341.0
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+      - name: Install dependencies
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm) pnpm install --frozen-lockfile; echo "WRANGLER=pnpm exec wrangler" >> "$GITHUB_ENV" ;;
+            npm) npm ci; echo "WRANGLER=npx --no-install wrangler" >> "$GITHUB_ENV" ;;
+            none) echo "WRANGLER=npx --yes wrangler@4.164.0" >> "$GITHUB_ENV" ;;
+            *) echo "::error::package-manager must be npm, pnpm or none"; exit 1 ;;
+          esac
+      - name: Build
+        run: ${{ inputs.build-command }}
+        env:
+          # Astro and other Cloudflare build plugins write the chosen env into their output config.
+          CLOUDFLARE_ENV: ${{ inputs.wrangler-env }}
+          SENTRY_RELEASE: ${{ github.sha }}
+      - name: Check deploy target
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { existsSync, readFileSync } from 'node:fs';
+          import { dirname, resolve } from 'node:path';
+          // JSONC: drop comments outside strings, then trailing commas.
+          const parse = (file) => JSON.parse(readFileSync(file, 'utf8')
+            .replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, s) => s ?? '')
+            .replace(/,(\s*[}\]])/g, '$1'));
+          const env = process.env.WRANGLER_ENV;
+          let name, account;
+          const pointer = '.wrangler/deploy/config.json';
+          if (existsSync(pointer)) {
+            // A build plugin wrote the final config, with the env already applied.
+            const target = resolve(dirname(pointer), parse(pointer).configPath);
+            ({ name, account_id: account } = parse(target));
+            console.log(`config: ${target} (built for env "${env}")`);
+          } else {
+            const file = ['wrangler.jsonc', 'wrangler.json'].find(existsSync);
+            const config = parse(file);
+            const override = env ? config.env?.[env] : config;
+            assert.ok(override, `${file} has no env.${env}`);
+            name = override.name ?? (env ? `${config.name}-${env}` : config.name);
+            account = override.account_id ?? config.account_id;
+            console.log(`config: ${file}, env "${env}"`);
+          }
+          console.log(`worker: ${name}, account: ${account}`);
+          assert.equal(name, process.env.EXPECTED_WORKER, 'Worker name');
+          assert.equal(account, process.env.EXPECTED_ACCOUNT, 'Cloudflare account id');
+          JS
+        env:
+          EXPECTED_WORKER: ${{ inputs.worker-name }}
+          EXPECTED_ACCOUNT: ${{ inputs.account-id }}
+      - name: Before deploy
+        if: inputs.pre-deploy-command != ''
+        run: |
+          # An unset secret arrives as an empty string; wrangler then uses wrangler.jsonc's account_id.
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
+          ${{ inputs.pre-deploy-command }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Deploy
+        run: |
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
+          # A build plugin's config already holds the env, so --env is left off.
+          if [ -n "$WRANGLER_ENV" ] && [ ! -f .wrangler/deploy/config.json ]; then
+            set -- --env "$WRANGLER_ENV"
+          fi
+          $WRANGLER deploy "$@" --message "$GITHUB_SHA"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
