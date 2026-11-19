@@ -33,7 +33,8 @@ permissions:
 jobs:
   check:
     name: check
-    runs-on: ubuntu-latest
+    # Pinned, so a new ubuntu-latest image cannot break builds unannounced (Playwright 1.56 refuses 26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # A newer push to the same pull request replaces the run in progress.
     concurrency:
