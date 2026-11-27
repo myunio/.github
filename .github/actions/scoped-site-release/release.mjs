@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ACCOUNT = "288ed9ea6daf5bd29702d1b90b49cd6b";
+const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
 const ACCESS_ISSUER = "https://uniotechnologies.cloudflareaccess.com";
 const LOCK_BUCKET = "unio-sites-release-locks";
 const HEX_ID = /^[0-9a-f]{32}$/;
@@ -25,7 +26,7 @@ const stagingUrl = `https://staging.${site.domain}`;
 assert.equal(env.EXPECTED_WORKER, workerName);
 assert.equal(env.EXPECTED_ACCOUNT, ACCOUNT);
 assert.equal(env.RELEASE_URL, stage === "staging" ? stagingUrl : `https://${site.domain}`);
-assert.ok(env.GOOGLE_TOKEN && env.CLOUDFLARE_API_TOKEN, "Release credentials are missing.");
+assert.ok(env.GOOGLE_TOKEN, "Google release credentials are missing.");
 
 const settings = JSON.parse(readFileSync(".github/site-release.json", "utf8"));
 assert.equal(settings.accountId, ACCOUNT);
@@ -70,7 +71,7 @@ async function request(url, token, method = "GET", body) {
   return response.status === 204 ? undefined : response.json();
 }
 
-const accountApi = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}`;
+const accountApi = `${CLOUDFLARE_API}/accounts/${ACCOUNT}`;
 const script = `workers/scripts/${workerName}`;
 async function cloudflare(path) {
   const data = await request(`${accountApi}/${path}`, env.CLOUDFLARE_API_TOKEN);
@@ -92,16 +93,18 @@ async function deployment() {
   return deployments[0];
 }
 
-function wrangler(args, outputFile) {
+function wrangler(args, envFile, outputFile) {
   // Use the pinned CLI and only the scoped account/token. Exclude alternate host and auth variables
   // and keep the Google credential outside the Wrangler subprocess.
   const childEnv = Object.fromEntries(Object.entries(env).filter(([key]) =>
     !/^(CLOUDFLARE_|CLOUDFLARE$|CF_|WRANGLER_|GOOGLE_|ACTIONS_ID_TOKEN_)/i.test(key)));
   childEnv.CLOUDFLARE_API_TOKEN = env.CLOUDFLARE_API_TOKEN;
   childEnv.CLOUDFLARE_ACCOUNT_ID = ACCOUNT;
+  childEnv.CLOUDFLARE_API_BASE_URL = CLOUDFLARE_API;
+  childEnv.CLOUDFLARE_BASE_URL = CLOUDFLARE_API;
   childEnv.WRANGLER_SEND_METRICS = "false";
   if (outputFile) childEnv.WRANGLER_OUTPUT_FILE_PATH = outputFile;
-  execFileSync("npx", ["--yes", "wrangler@4.164.0", ...args], { env: childEnv, stdio: "inherit" });
+  execFileSync("npx", ["--yes", "wrangler@4.164.0", ...args, "--env-file", envFile], { env: childEnv, stdio: "inherit" });
 }
 
 function siteRequest(path, headers = {}) {
@@ -140,38 +143,52 @@ async function verifyStaging() {
   }
 }
 
-const name = `${workerName}.lock`;
-const query = new URLSearchParams({ uploadType: "media", name, ifGenerationMatch: "0" });
-const lock = await request(`https://storage.googleapis.com/upload/storage/v1/b/${LOCK_BUCKET}/o?${query}`,
-  env.GOOGLE_TOKEN, "POST", { holder: `${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` });
-assert.match(lock.generation, /^[0-9]+$/);
-try {
-  await verifyWorker();
-  const before = await deployment();
-  const configPath = `.wrangler-release-${env.GITHUB_RUN_ID}.json`;
-  writeFileSync(configPath, JSON.stringify(config), { flag: "wx" });
-  const output = join(mkdtempSync(join(tmpdir(), "site-release-")), "output.ndjson");
-  wrangler(["versions", "upload", "--config", configPath, "--message", env.GITHUB_SHA], output);
-  const uploads = readFileSync(output, "utf8").trim().split("\n").map((line) => JSON.parse(line))
-    .filter(({ type }) => type === "version-upload");
-  assert.equal(uploads.length, 1, "Expected one uploaded Worker version.");
-  const version = uploads[0].version_id;
-  assert.ok(VERSION_ID.test(version), "Wrangler did not report the uploaded version ID.");
-  const uploaded = await cloudflare(`${script}/versions/${version}`);
-  const bindings = uploaded.resources?.bindings ?? [];
-  const kv = bindings.filter(({ type, name }) => type === "kv_namespace" && name === "FORM_LIMITS");
-  assert.equal(kv.length, 1);
-  assert.equal(kv[0].namespace_id, target.kvId, "Uploaded version has the wrong FORM_LIMITS namespace.");
-  assert.deepEqual(await deployment(), before, "The active deployment changed during upload.");
-  wrangler(["versions", "deploy", `${version}@100%`, "--config", configPath, "--yes"]);
-  const active = await deployment();
-  assert.equal(active?.versions.length, 1);
-  assert.equal(active.versions[0].version_id, version);
-  assert.equal(active.versions[0].percentage, 100);
-  await verifyWorker();
-  if (stage === "staging" && verifyHostname) await verifyStaging();
-  console.log(`Deployed ${workerName} version ${version} at 100%.`);
-} finally {
-  await request(`https://storage.googleapis.com/storage/v1/b/${LOCK_BUCKET}/o/${name}?ifGenerationMatch=${lock.generation}`,
-    env.GOOGLE_TOKEN, "DELETE");
+async function release() {
+  assert.ok(env.CLOUDFLARE_API_TOKEN, "The scoped Cloudflare token is missing.");
+  const name = `${workerName}.lock`;
+  const query = new URLSearchParams({ uploadType: "media", name, ifGenerationMatch: "0" });
+  const lock = await request(`https://storage.googleapis.com/upload/storage/v1/b/${LOCK_BUCKET}/o?${query}`,
+    env.GOOGLE_TOKEN, "POST", { holder: `${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` });
+  assert.match(lock.generation, /^[0-9]+$/);
+  try {
+    await verifyWorker();
+    const before = await deployment();
+    const configPath = `.wrangler-release-${env.GITHUB_RUN_ID}.json`;
+    writeFileSync(configPath, JSON.stringify(config), { flag: "wx" });
+    const work = mkdtempSync(join(tmpdir(), "site-release-"));
+    const trustedEnv = join(work, "release.env");
+    writeFileSync(trustedEnv, "", { flag: "wx", mode: 0o600 });
+    const output = join(work, "output.ndjson");
+    wrangler(["versions", "upload", "--config", configPath, "--message", env.GITHUB_SHA], trustedEnv, output);
+    const uploads = readFileSync(output, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+      .filter(({ type }) => type === "version-upload");
+    assert.equal(uploads.length, 1, "Expected one uploaded Worker version.");
+    const version = uploads[0].version_id;
+    assert.ok(VERSION_ID.test(version), "Wrangler did not report the uploaded version ID.");
+    const uploaded = await cloudflare(`${script}/versions/${version}`);
+    const bindings = uploaded.resources?.bindings ?? [];
+    const kv = bindings.filter(({ type, name }) => type === "kv_namespace" && name === "FORM_LIMITS");
+    assert.equal(kv.length, 1);
+    assert.equal(kv[0].namespace_id, target.kvId, "Uploaded version has the wrong FORM_LIMITS namespace.");
+    assert.deepEqual(await deployment(), before, "The active deployment changed during upload.");
+    wrangler(["versions", "deploy", `${version}@100%`, "--config", configPath, "--yes"], trustedEnv);
+    const active = await deployment();
+    assert.equal(active?.versions.length, 1);
+    assert.equal(active.versions[0].version_id, version);
+    assert.equal(active.versions[0].percentage, 100);
+    await verifyWorker();
+    appendFileSync(env.GITHUB_OUTPUT, `verify_hostname=${verifyHostname}\n`);
+    console.log(`Deployed ${workerName} version ${version} at 100%.`);
+  } finally {
+    await request(`https://storage.googleapis.com/storage/v1/b/${LOCK_BUCKET}/o/${name}?ifGenerationMatch=${lock.generation}`,
+      env.GOOGLE_TOKEN, "DELETE");
+  }
+}
+
+if (env.RELEASE_OPERATION === "smoke") {
+  assert.ok(stage === "staging" && verifyHostname, "Staging hostname verification is disabled.");
+  await verifyStaging();
+} else {
+  assert.equal(env.RELEASE_OPERATION, "deploy");
+  await release();
 }

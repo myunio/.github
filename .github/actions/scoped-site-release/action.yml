@@ -1,7 +1,12 @@
 name: Scoped website release
-description: Deploy one reviewed Worker version under the shared release lock.
+description: Deploy one reviewed Worker version or verify its staging Access hostname.
+outputs:
+  verify_hostname:
+    description: Whether this release enables staging hostname verification.
+    value: ${{ steps.release.outputs.verify_hostname }}
 runs:
   using: composite
   steps:
-    - shell: bash
+    - id: release
+      shell: bash
       run: node "$GITHUB_ACTION_PATH/release.mjs"
