@@ -196,7 +196,7 @@ jobs:
       - name: Upload, activate and verify the scoped Worker version
         id: scoped-deploy
         if: inputs.scoped-site-release
-        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
+        uses: myunio/.github/.github/actions/scoped-site-release@cb4da40168b1c329438db719281072ddf490d0d4
         env:
           RELEASE_OPERATION: deploy
           RELEASE_STAGE: ${{ inputs.environment }}
@@ -207,7 +207,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - name: Verify staging Access and assets
         if: inputs.scoped-site-release && inputs.environment == 'staging' && steps.scoped-deploy.outputs.verify_hostname == 'true'
-        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
+        uses: myunio/.github/.github/actions/scoped-site-release@cb4da40168b1c329438db719281072ddf490d0d4
         env:
           RELEASE_OPERATION: smoke
           RELEASE_STAGE: staging
