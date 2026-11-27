@@ -1,0 +1,7 @@
+name: Scoped website release
+description: Deploy one reviewed Worker version under the shared release lock.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: node "$GITHUB_ACTION_PATH/release.mjs"

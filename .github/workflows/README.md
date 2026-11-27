@@ -41,3 +41,21 @@ must reach.
 - **No overlap**: one deploy at a time per environment in each repo; a running deploy is never
   cancelled.
 - Actions are pinned to commit SHAs.
+
+## Scoped Unio releases
+
+UltraOffice and Unio Software opt into the scoped path. Their protected
+GitHub environments supply the per-Worker deploy token. The shared job
+reads the public account, Worker and KV IDs from reviewed config. It
+checks the Worker identity and public URL settings, uploads a version,
+checks its KV binding and activates that exact version. The Google
+Cloud Storage lock serializes the release with OpenTofu binding writes.
+
+A staging release starts on a push to main. The bootstrap release may
+run before the hostname is attached. After attachment, the reviewed
+site config enables the hostname checks. They verify the Unio Access
+challenge on the homepage, stylesheet and form endpoint. UltraOffice
+also checks the inbound service token using the two pinned Secret
+Manager versions. Production requires Steve to dispatch the current main
+commit on the first attempt, a green staging run of that commit and
+enabled hostname checks.

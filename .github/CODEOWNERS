@@ -1,0 +1,9 @@
+# Clint owns general content. Steve owns build and release controls.
+* @ClintCurtis77
+/.github/ @steveclarke
+/bin/ @steveclarke
+/scripts/ @steveclarke
+/package*.json @steveclarke
+/Gemfile* @steveclarke
+/wrangler.* @steveclarke
+/tofu/ @steveclarke
