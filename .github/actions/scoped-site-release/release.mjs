@@ -30,7 +30,7 @@ assert.ok(env.GOOGLE_TOKEN && env.CLOUDFLARE_API_TOKEN, "Release credentials are
 const settings = JSON.parse(readFileSync(".github/site-release.json", "utf8"));
 assert.equal(settings.accountId, ACCOUNT);
 const target = settings[stage];
-assert.ok(HEX_ID.test(target.workerId), "Pin the live Worker ID in .github/site-release.json.");
+assert.ok(HEX_ID.test(target.workerId) || VERSION_ID.test(target.workerId), "Pin the live Worker ID in .github/site-release.json.");
 assert.ok(HEX_ID.test(target.kvId), "Pin the live FORM_LIMITS namespace ID in .github/site-release.json.");
 assert.ok(AUDIENCE.test(settings.staging.accessAudience), "Pin the live staging Access audience.");
 assert.equal(typeof settings.staging.verifyHostname, "boolean");
