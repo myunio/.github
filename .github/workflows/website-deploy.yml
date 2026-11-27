@@ -2,7 +2,8 @@
 # Each repo calls it twice: deploy-staging.yml on every merge to main, and release.yml, run by
 # hand from main (Actions > Release to production > Run workflow).
 #
-# Secrets: the caller passes `secrets: inherit`, and this job names the GitHub environment
+# Scoped releases read the deploy token from the named GitHub environment.
+# Existing callers pass `secrets: inherit`, and this job names the GitHub environment
 # (staging or production). GitHub then reads CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID from
 # the caller repo's environment first, and from its repository secrets only when the environment
 # has none: "If you include the environment keyword in the reusable workflow at the job level,
@@ -58,8 +59,14 @@ on:
         type: string
         required: true
 
-permissions:
-  contents: read
+      scoped-site-release:
+        description: Use the per-Worker token and verify the reviewed release target.
+        type: boolean
+        default: false
+      reviewed-commit:
+        description: Full reviewed main commit required for scoped production releases.
+        type: string
+        default: ''
 
 jobs:
   deploy:
@@ -137,7 +144,79 @@ jobs:
         env:
           EXPECTED_WORKER: ${{ inputs.worker-name }}
           EXPECTED_ACCOUNT: ${{ inputs.account-id }}
+      - name: Authorize scoped release
+        if: inputs.scoped-site-release
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          REVIEWED_COMMIT: ${{ inputs.reviewed-commit }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_ENVIRONMENT" == staging && "$GITHUB_EVENT_NAME" == push ]]; then
+            exit 0
+          fi
+          if [[ "$TARGET_ENVIRONMENT" != production || "$GITHUB_EVENT_NAME" != workflow_dispatch ||
+                "$GITHUB_REF" != refs/heads/main || "$GITHUB_ACTOR_ID" != 1305 ||
+                "$TRIGGERING_ACTOR" != steveclarke || "$GITHUB_RUN_ATTEMPT" != 1 ||
+                "$REVIEWED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo '::error::Steve must dispatch the reviewed main commit for production.'
+            exit 1
+          fi
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+            echo '::error::The reviewed commit is no longer the tip of main.'
+            exit 1
+          fi
+          runs=$(gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml/runs" \
+            -f branch=main -f event=push -f status=success -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            --jq '.workflow_runs[].id')
+          while IFS= read -r run; do
+            [[ -n "$run" ]] || continue
+            verified=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | select(.name == "deploy / deploy" and .conclusion == "success") |
+                select(any(.steps[]; .name == "Upload, activate and verify the scoped Worker version" and .conclusion == "success")) |
+                select(any(.steps[]; .name == "Verify staging Access and assets" and .conclusion == "success")) | .id')
+            if [[ -n "$verified" ]]; then
+              exit 0
+            fi
+          done <<< "$runs"
+          echo '::error::This commit needs a successful scoped staging deployment and Access smoke check.'
+          exit 1
+      - name: Authenticate for the Worker release lock
+        if: inputs.scoped-site-release
+        id: release-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: projects/1007131226373/locations/global/workloadIdentityPools/github-tofu/providers/release-${{ inputs.worker-name }}
+          service_account: ${{ inputs.worker-name }}@opentofu-state-unio.iam.gserviceaccount.com
+          token_format: access_token
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Upload, activate and verify the scoped Worker version
+        id: scoped-deploy
+        if: inputs.scoped-site-release
+        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
+        env:
+          RELEASE_OPERATION: deploy
+          RELEASE_STAGE: ${{ inputs.environment }}
+          EXPECTED_WORKER: ${{ inputs.worker-name }}
+          EXPECTED_ACCOUNT: ${{ inputs.account-id }}
+          RELEASE_URL: ${{ inputs.url }}
+          GOOGLE_TOKEN: ${{ steps.release-auth.outputs.access_token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify staging Access and assets
+        if: inputs.scoped-site-release && inputs.environment == 'staging' && steps.scoped-deploy.outputs.verify_hostname == 'true'
+        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
+        env:
+          RELEASE_OPERATION: smoke
+          RELEASE_STAGE: staging
+          EXPECTED_WORKER: ${{ inputs.worker-name }}
+          EXPECTED_ACCOUNT: ${{ inputs.account-id }}
+          RELEASE_URL: ${{ inputs.url }}
+          GOOGLE_TOKEN: ${{ steps.release-auth.outputs.access_token }}
       - name: Deploy
+        if: '!inputs.scoped-site-release'
         run: |
           # An unset secret arrives as an empty string; wrangler then uses wrangler.jsonc's account_id.
           [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || unset CLOUDFLARE_ACCOUNT_ID
