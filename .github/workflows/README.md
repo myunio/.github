@@ -57,5 +57,15 @@ site config enables the hostname checks. They verify the Unio Access
 challenge on the homepage, stylesheet and form endpoint. UltraOffice
 also checks the inbound service token using the two pinned Secret
 Manager versions. Production requires Steve to dispatch the current main
-commit on the first attempt, a green staging run of that commit and
-enabled hostname checks.
+commit on the first attempt. GitHub must show both the scoped deploy step
+and the hostname smoke step succeeded in that commit's staging job.
+
+### First release from a Worker shell
+
+Before attaching any site hostname, prove the pinned Wrangler upload and
+activation on a disposable Worker shell made the same way as the site
+Workers. Use a token limited to that shell with Individual Workers Editor.
+Keep both public URL settings off. Record the version ID, the active version
+readback and the two URL settings before and after. If the first upload needs
+a seed, stop the hostname handoff until a reviewed OpenTofu change can seed
+the shell. Keep the release token scoped to one Worker and repeat the trial.

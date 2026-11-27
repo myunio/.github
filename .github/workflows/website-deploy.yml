@@ -168,13 +168,21 @@ jobs:
             echo '::error::The reviewed commit is no longer the tip of main.'
             exit 1
           fi
-          staging_sha=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml/runs" \
-            -f branch=main -f event=push -f status=success -f head_sha="$GITHUB_SHA" \
-            --jq '.workflow_runs[0].head_sha // ""')
-          if [[ "$staging_sha" != "$GITHUB_SHA" ]]; then
-            echo '::error::This commit needs a successful staging run.'
-            exit 1
-          fi
+          runs=$(gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml/runs" \
+            -f branch=main -f event=push -f status=success -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            --jq '.workflow_runs[].id')
+          while IFS= read -r run; do
+            [[ -n "$run" ]] || continue
+            verified=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | select(.name == "deploy / deploy" and .conclusion == "success") |
+                select(any(.steps[]; .name == "Upload, activate and verify the scoped Worker version" and .conclusion == "success")) |
+                select(any(.steps[]; .name == "Verify staging Access and assets" and .conclusion == "success")) | .id')
+            if [[ -n "$verified" ]]; then
+              exit 0
+            fi
+          done <<< "$runs"
+          echo '::error::This commit needs a successful scoped staging deployment and Access smoke check.'
+          exit 1
       - name: Authenticate for the Worker release lock
         if: inputs.scoped-site-release
         id: release-auth
@@ -186,15 +194,27 @@ jobs:
           create_credentials_file: false
           export_environment_variables: false
       - name: Upload, activate and verify the scoped Worker version
+        id: scoped-deploy
         if: inputs.scoped-site-release
-        uses: myunio/.github/.github/actions/scoped-site-release@main
+        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
         env:
+          RELEASE_OPERATION: deploy
           RELEASE_STAGE: ${{ inputs.environment }}
           EXPECTED_WORKER: ${{ inputs.worker-name }}
           EXPECTED_ACCOUNT: ${{ inputs.account-id }}
           RELEASE_URL: ${{ inputs.url }}
           GOOGLE_TOKEN: ${{ steps.release-auth.outputs.access_token }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify staging Access and assets
+        if: inputs.scoped-site-release && inputs.environment == 'staging' && steps.scoped-deploy.outputs.verify_hostname == 'true'
+        uses: myunio/.github/.github/actions/scoped-site-release@4d6e1a16e94593aa798c6571a01cbd3c3e4afd02
+        env:
+          RELEASE_OPERATION: smoke
+          RELEASE_STAGE: staging
+          EXPECTED_WORKER: ${{ inputs.worker-name }}
+          EXPECTED_ACCOUNT: ${{ inputs.account-id }}
+          RELEASE_URL: ${{ inputs.url }}
+          GOOGLE_TOKEN: ${{ steps.release-auth.outputs.access_token }}
       - name: Deploy
         if: '!inputs.scoped-site-release'
         run: |
